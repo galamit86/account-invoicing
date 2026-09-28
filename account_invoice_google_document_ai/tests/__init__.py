@@ -1,1 +1,1 @@
-from . import test_google_document_ai
+from . import test_invoice_ocr

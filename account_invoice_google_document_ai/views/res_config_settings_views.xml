@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<odoo>
+    <record id="res_config_settings_view_form_invoice_ocr" model="ir.ui.view">
+        <field name="name">res.config.settings.form.invoice.ocr</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="account.res_config_settings_view_form" />
+        <field name="arch" type="xml">
+            <setting id="account_ocr_settings" position="before">
+                <setting
+                    id="account_invoice_google_document_ai_settings"
+                    string="Google invoice extraction"
+                    help="Extract emailed and uploaded vendor invoice PDFs with Google Document AI."
+                    company_dependent="1"
+                >
+                    <field name="invoice_ocr_google_mode" />
+                    <div
+                        class="content-group"
+                        invisible="invoice_ocr_google_mode == 'disabled'"
+                    >
+                        <div class="row mt16">
+                            <label
+                                for="invoice_ocr_google_project"
+                                class="col-lg-3 o_light_label"
+                            />
+                            <field name="invoice_ocr_google_project" />
+                        </div>
+                        <div class="row mt16">
+                            <label
+                                for="invoice_ocr_google_location"
+                                class="col-lg-3 o_light_label"
+                            />
+                            <field name="invoice_ocr_google_location" />
+                        </div>
+                        <div class="row mt16">
+                            <label
+                                for="invoice_ocr_google_processor"
+                                class="col-lg-3 o_light_label"
+                            />
+                            <field name="invoice_ocr_google_processor" />
+                        </div>
+                        <div class="row mt16">
+                            <label
+                                for="invoice_ocr_google_processor_version"
+                                class="col-lg-3 o_light_label"
+                            />
+                            <field name="invoice_ocr_google_processor_version" />
+                        </div>
+                        <div class="row mt16">
+                            <label
+                                for="invoice_ocr_confidence_threshold"
+                                class="col-lg-3 o_light_label"
+                            />
+                            <field name="invoice_ocr_confidence_threshold" />
+                        </div>
+                        <div class="row mt16">
+                            <label
+                                for="invoice_ocr_auto_post"
+                                class="col-lg-3 o_light_label"
+                            />
+                            <field name="invoice_ocr_auto_post" />
+                        </div>
+                        <div class="text-muted mt8">
+                            Authentication uses Google Application Default Credentials configured on the Odoo host.
+                        </div>
+                    </div>
+                </setting>
+            </setting>
+        </field>
+    </record>
+</odoo>

@@ -1,10 +1,6 @@
-.. image:: https://odoo-community.org/readme-banner-image
-   :target: https://odoo-community.org/get-involved?utm_source=readme
-   :alt: Odoo Community Association
-
-==========================
-Account Invoice Ocr Google
-==========================
+======================================
+Account Invoice OCR Google Document AI
+======================================
 
 .. 
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -17,22 +13,33 @@ Account Invoice Ocr Google
 .. |badge1| image:: https://img.shields.io/badge/maturity-Beta-yellow.png
     :target: https://odoo-community.org/page/development-status
     :alt: Beta
-.. |badge2| image:: https://img.shields.io/badge/license-AGPL--3-blue.png
+.. |badge2| image:: https://img.shields.io/badge/licence-AGPL--3-blue.png
     :target: http://www.gnu.org/licenses/agpl-3.0-standalone.html
     :alt: License: AGPL-3
 .. |badge3| image:: https://img.shields.io/badge/github-OCA%2Faccount--invoicing-lightgray.png?logo=github
-    :target: https://github.com/OCA/account-invoicing/tree/16.0/account_invoice_google_document_ai
+    :target: https://github.com/OCA/account-invoicing/tree/18.0/account_invoice_google_document_ai
     :alt: OCA/account-invoicing
 .. |badge4| image:: https://img.shields.io/badge/weblate-Translate%20me-F47D42.png
-    :target: https://translation.odoo-community.org/projects/account-invoicing-16-0/account-invoicing-16-0-account_invoice_google_document_ai
+    :target: https://translation.odoo-community.org/projects/account-invoicing-18-0/account-invoicing-18-0-account_invoice_google_document_ai
     :alt: Translate me on Weblate
 .. |badge5| image:: https://img.shields.io/badge/runboat-Try%20me-875A7B.png
-    :target: https://runboat.odoo-community.org/builds?repo=OCA/account-invoicing&target_branch=16.0
+    :target: https://runboat.odoo-community.org/builds?repo=OCA/account-invoicing&target_branch=18.0
     :alt: Try me on Runboat
 
 |badge1| |badge2| |badge3| |badge4| |badge5|
 
-This module allows to pass data directly to Google OCR in order to parse the Invoice
+This module extracts vendor bill data from PDF attachments with Google
+Document AI.
+
+It integrates with Odoo's native invoice attachment decoder so
+structured UBL/CII/Factur-X documents keep using the native decoder
+first. Ordinary PDFs are processed asynchronously with ``queue_job``.
+Extracted supplier, company, currency, tax, totals, invoice lines,
+purchase order references, and bank details are checked before a bill is
+considered ready.
+
+Uncertain or inconsistent results remain in draft for review. Existing
+invoice lines are never replaced by a repeated extraction.
 
 **Table of contents**
 
@@ -42,15 +49,19 @@ This module allows to pass data directly to Google OCR in order to parse the Inv
 Configuration
 =============
 
-In order to configure this functionality, it is necessary to create a Google Cloud Console account and App.
-Then, we need to active Document AI API to this App and finally create an OCR processor.
-
-Also, a user for this App is necessary.
-We can use our own credential files created using gcloud auth login or create service account on Google Cloud Console.
-For the service account, we need to give it permissions to access Google Document AI API.
-We need to store the JSON File.
-
-With all this information we can add the information on our Odoo instance on `Invoicing \ Settings`.
+1. Enable the Document AI API in a Google Cloud project.
+2. Create an Invoice Parser processor, preferably in the ``eu``
+   multi-region.
+3. Grant the Odoo runtime identity ``roles/documentai.apiUser``.
+4. Configure Application Default Credentials for the Odoo process.
+   Service-account private keys are intentionally not stored in Odoo.
+5. Load ``queue_job`` as a server-wide module and configure its job
+   runner.
+6. In *Accounting > Configuration > Settings*, configure the project,
+   location, processor, optional pinned processor version, and
+   confidence threshold.
+7. Keep automatic posting disabled until representative invoices have
+   been validated.
 
 Bug Tracker
 ===========
@@ -58,7 +69,7 @@ Bug Tracker
 Bugs are tracked on `GitHub Issues <https://github.com/OCA/account-invoicing/issues>`_.
 In case of trouble, please check there if your issue has already been reported.
 If you spotted it first, help us to smash it by providing a detailed and welcomed
-`feedback <https://github.com/OCA/account-invoicing/issues/new?body=module:%20account_invoice_google_document_ai%0Aversion:%2016.0%0A%0A**Steps%20to%20reproduce**%0A-%20...%0A%0A**Current%20behavior**%0A%0A**Expected%20behavior**>`_.
+`feedback <https://github.com/OCA/account-invoicing/issues/new?body=module:%20account_invoice_google_document_ai%0Aversion:%2018.0%0A%0A**Steps%20to%20reproduce**%0A-%20...%0A%0A**Current%20behavior**%0A%0A**Expected%20behavior**>`_.
 
 Do not contact contributors directly about support or help with technical issues.
 
@@ -66,19 +77,21 @@ Credits
 =======
 
 Authors
-~~~~~~~
+-------
 
 * CreuBlanca
 * ForgeFlow
+* Roetz
 
 Contributors
-~~~~~~~~~~~~
+------------
 
-* Enric Tobella
-* Joan Sisquella
+- Enric Tobella
+- Joan Sisquella
+- Roetz
 
 Maintainers
-~~~~~~~~~~~
+-----------
 
 This module is maintained by the OCA.
 
@@ -90,6 +103,6 @@ OCA, or the Odoo Community Association, is a nonprofit organization whose
 mission is to support the collaborative development of Odoo features and
 promote its widespread use.
 
-This module is part of the `OCA/account-invoicing <https://github.com/OCA/account-invoicing/tree/16.0/account_invoice_google_document_ai>`_ project on GitHub.
+This module is part of the `OCA/account-invoicing <https://github.com/OCA/account-invoicing/tree/18.0/account_invoice_google_document_ai>`_ project on GitHub.
 
 You are welcome to contribute. To learn how please visit https://odoo-community.org/page/Contribute.
