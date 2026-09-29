@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from google.cloud import documentai_v1 as documentai
 
+from odoo import Command
 from odoo.exceptions import ValidationError
 from odoo.tests import TransactionCase, tagged
 
@@ -300,6 +301,13 @@ class TestInvoiceGoogleDocumentAI(TransactionCase):
         encoded = base64.b64encode(json.dumps(credential_values).encode())
         credentials = MagicMock()
         service = self.env["account.invoice.google.document.ai"]
+        invoice_user = self.env["res.users"].create(
+            {
+                "name": "Invoice OCR user",
+                "login": "invoice-ocr-user",
+                "groups_id": [Command.set([self.env.ref("base.group_user").id])],
+            }
+        )
         credentials_path = (
             "odoo.addons.account_invoice_google_document_ai.models."
             "google_document_ai.service_account.Credentials."
@@ -313,7 +321,9 @@ class TestInvoiceGoogleDocumentAI(TransactionCase):
         with patch(credentials_path, return_value=credentials) as from_info:
             self.company.invoice_ocr_google_credentials = encoded
             with patch(client_path) as client:
-                service._get_client(self.company)
+                service.with_user(invoice_user)._get_client(
+                    self.company.with_user(invoice_user)
+                )
 
         from_info.assert_called()
         self.assertEqual(from_info.call_args.args[0], credential_values)

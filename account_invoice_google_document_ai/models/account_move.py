@@ -181,7 +181,7 @@ class AccountMove(models.Model):
                 (company.invoice_ocr_google_location, _("Google location")),
                 (company.invoice_ocr_google_processor, _("Google processor")),
                 (
-                    company.invoice_ocr_google_credentials,
+                    company.sudo().invoice_ocr_google_credentials,
                     _("Google service-account JSON"),
                 ),
             )

@@ -20,10 +20,11 @@ class AccountInvoiceGoogleDocumentAI(models.AbstractModel):
     _description = "Google Document AI invoice extraction service"
 
     def _get_credentials(self, company):
-        if not company.invoice_ocr_google_credentials:
+        encoded_credentials = company.sudo().invoice_ocr_google_credentials
+        if not encoded_credentials:
             raise ValueError(_("Upload a Google service-account JSON file."))
         try:
-            raw = base64.b64decode(company.invoice_ocr_google_credentials)
+            raw = base64.b64decode(encoded_credentials)
             values = json.loads(raw.decode("utf-8"))
             if values.get("type") != "service_account":
                 raise ValueError
