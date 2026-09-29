@@ -57,18 +57,50 @@ Configuration
 4. Create a JSON key for that service account.
 5. Load ``queue_job`` as a server-wide module and configure its job
    runner.
-6. In *Accounting > Configuration > Settings*, configure the project,
-   location, processor, optional pinned processor version, confidence
-   threshold, and upload the service-account JSON.
+6. In *Accounting > Configuration > Settings*, select the company and
+   configure the project, location, processor, exact processor-version
+   ID, confidence threshold, and service-account JSON. The settings are
+   company-specific. Pin a processor version that is available for the
+   configured processor instead of relying on Google's default version.
 7. Click **Test Google Connection** before enabling extraction. The test
    sends a small one-page image to the configured processor and can
-   incur one page of Document AI processing charges.
+   incur one page of Document AI processing charges. Repeat this test
+   whenever the processor version or credentials change.
 8. Keep automatic posting disabled until representative invoices have
    been validated.
 
 The service-account private key is stored in the Odoo database and its
 backups. Restrict administrator and backup access, use a dedicated
 least-privilege service account, and rotate the key when access changes.
+Record the accepted processor version in deployment documentation so
+every environment uses the same extraction model deliberately.
+
+Usage
+=====
+
+Attach a PDF to a draft vendor bill and click **Extract PDF** in manual
+mode. Automatic mode queues eligible incoming vendor-bill PDFs without
+requiring the button. Structured UBL, CII, and Factur-X documents
+continue to use Odoo's native decoder before Google Document AI is
+considered.
+
+Extraction runs asynchronously. Use the **OCR Processing**, **OCR Review
+Required**, and **OCR Failed** filters in the Bills list to monitor it.
+Review the supplier, invoice reference and date, currency,
+purchase-order match, bank account, lines, accounts, taxes, and totals
+before posting.
+
+Documents with low-confidence or inconsistent data remain in draft with
+an explanation. A detected pro-forma remains line-free and cannot be
+posted until it is replaced by the final invoice or explicitly
+reclassified after review. If the referenced purchase order is already
+represented by another active vendor bill, the possible duplicate is
+linked and OCR lines are not created.
+
+Keep automatic posting disabled during acceptance testing. Enable it
+only after representative suppliers, tax rates, purchase orders, credit
+notes, pro-formas, and duplicate documents have been tested with the
+pinned processor version.
 
 Bug Tracker
 ===========

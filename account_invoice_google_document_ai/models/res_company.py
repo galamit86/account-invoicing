@@ -27,7 +27,11 @@ class ResCompany(models.Model):
     )
     invoice_ocr_google_processor = fields.Char()
     invoice_ocr_google_processor_version = fields.Char(
-        help="Pin a processor version to keep extraction behavior stable.",
+        help=(
+            "Optional exact processor-version ID, for example "
+            "pretrained-invoice-v2.0-2023-12-06. Pin it to keep extraction "
+            "behavior stable, and test the connection after changing it."
+        ),
     )
     invoice_ocr_google_credentials = fields.Binary(
         string="Service Account JSON",

@@ -384,11 +384,12 @@ invoice lines are never replaced by a repeated extraction.</p>
 <div class="contents local topic" id="contents">
 <ul class="simple">
 <li><a class="reference internal" href="#configuration" id="toc-entry-1">Configuration</a></li>
-<li><a class="reference internal" href="#bug-tracker" id="toc-entry-2">Bug Tracker</a></li>
-<li><a class="reference internal" href="#credits" id="toc-entry-3">Credits</a><ul>
-<li><a class="reference internal" href="#authors" id="toc-entry-4">Authors</a></li>
-<li><a class="reference internal" href="#contributors" id="toc-entry-5">Contributors</a></li>
-<li><a class="reference internal" href="#maintainers" id="toc-entry-6">Maintainers</a></li>
+<li><a class="reference internal" href="#usage" id="toc-entry-2">Usage</a></li>
+<li><a class="reference internal" href="#bug-tracker" id="toc-entry-3">Bug Tracker</a></li>
+<li><a class="reference internal" href="#credits" id="toc-entry-4">Credits</a><ul>
+<li><a class="reference internal" href="#authors" id="toc-entry-5">Authors</a></li>
+<li><a class="reference internal" href="#contributors" id="toc-entry-6">Contributors</a></li>
+<li><a class="reference internal" href="#maintainers" id="toc-entry-7">Maintainers</a></li>
 </ul>
 </li>
 </ul>
@@ -404,21 +405,49 @@ multi-region.</li>
 <li>Create a JSON key for that service account.</li>
 <li>Load <tt class="docutils literal">queue_job</tt> as a server-wide module and configure its job
 runner.</li>
-<li>In <em>Accounting &gt; Configuration &gt; Settings</em>, configure the project,
-location, processor, optional pinned processor version, confidence
-threshold, and upload the service-account JSON.</li>
+<li>In <em>Accounting &gt; Configuration &gt; Settings</em>, select the company and
+configure the project, location, processor, exact processor-version
+ID, confidence threshold, and service-account JSON. The settings are
+company-specific. Pin a processor version that is available for the
+configured processor instead of relying on Google’s default version.</li>
 <li>Click <strong>Test Google Connection</strong> before enabling extraction. The test
 sends a small one-page image to the configured processor and can
-incur one page of Document AI processing charges.</li>
+incur one page of Document AI processing charges. Repeat this test
+whenever the processor version or credentials change.</li>
 <li>Keep automatic posting disabled until representative invoices have
 been validated.</li>
 </ol>
 <p>The service-account private key is stored in the Odoo database and its
 backups. Restrict administrator and backup access, use a dedicated
-least-privilege service account, and rotate the key when access changes.</p>
+least-privilege service account, and rotate the key when access changes.
+Record the accepted processor version in deployment documentation so
+every environment uses the same extraction model deliberately.</p>
+</div>
+<div class="section" id="usage">
+<h1><a class="toc-backref" href="#toc-entry-2">Usage</a></h1>
+<p>Attach a PDF to a draft vendor bill and click <strong>Extract PDF</strong> in manual
+mode. Automatic mode queues eligible incoming vendor-bill PDFs without
+requiring the button. Structured UBL, CII, and Factur-X documents
+continue to use Odoo’s native decoder before Google Document AI is
+considered.</p>
+<p>Extraction runs asynchronously. Use the <strong>OCR Processing</strong>, <strong>OCR Review
+Required</strong>, and <strong>OCR Failed</strong> filters in the Bills list to monitor it.
+Review the supplier, invoice reference and date, currency,
+purchase-order match, bank account, lines, accounts, taxes, and totals
+before posting.</p>
+<p>Documents with low-confidence or inconsistent data remain in draft with
+an explanation. A detected pro-forma remains line-free and cannot be
+posted until it is replaced by the final invoice or explicitly
+reclassified after review. If the referenced purchase order is already
+represented by another active vendor bill, the possible duplicate is
+linked and OCR lines are not created.</p>
+<p>Keep automatic posting disabled during acceptance testing. Enable it
+only after representative suppliers, tax rates, purchase orders, credit
+notes, pro-formas, and duplicate documents have been tested with the
+pinned processor version.</p>
 </div>
 <div class="section" id="bug-tracker">
-<h1><a class="toc-backref" href="#toc-entry-2">Bug Tracker</a></h1>
+<h1><a class="toc-backref" href="#toc-entry-3">Bug Tracker</a></h1>
 <p>Bugs are tracked on <a class="reference external" href="https://github.com/OCA/account-invoicing/issues">GitHub Issues</a>.
 In case of trouble, please check there if your issue has already been reported.
 If you spotted it first, help us to smash it by providing a detailed and welcomed
@@ -426,9 +455,9 @@ If you spotted it first, help us to smash it by providing a detailed and welcome
 <p>Do not contact contributors directly about support or help with technical issues.</p>
 </div>
 <div class="section" id="credits">
-<h1><a class="toc-backref" href="#toc-entry-3">Credits</a></h1>
+<h1><a class="toc-backref" href="#toc-entry-4">Credits</a></h1>
 <div class="section" id="authors">
-<h2><a class="toc-backref" href="#toc-entry-4">Authors</a></h2>
+<h2><a class="toc-backref" href="#toc-entry-5">Authors</a></h2>
 <ul class="simple">
 <li>CreuBlanca</li>
 <li>ForgeFlow</li>
@@ -436,7 +465,7 @@ If you spotted it first, help us to smash it by providing a detailed and welcome
 </ul>
 </div>
 <div class="section" id="contributors">
-<h2><a class="toc-backref" href="#toc-entry-5">Contributors</a></h2>
+<h2><a class="toc-backref" href="#toc-entry-6">Contributors</a></h2>
 <ul class="simple">
 <li>Enric Tobella</li>
 <li>Joan Sisquella</li>
@@ -444,7 +473,7 @@ If you spotted it first, help us to smash it by providing a detailed and welcome
 </ul>
 </div>
 <div class="section" id="maintainers">
-<h2><a class="toc-backref" href="#toc-entry-6">Maintainers</a></h2>
+<h2><a class="toc-backref" href="#toc-entry-7">Maintainers</a></h2>
 <p>This module is maintained by the OCA.</p>
 <a class="reference external image-reference" href="https://odoo-community.org">
 <img alt="Odoo Community Association" src="https://odoo-community.org/logo.png" />
