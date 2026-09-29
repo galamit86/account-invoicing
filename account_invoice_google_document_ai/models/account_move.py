@@ -49,6 +49,16 @@ class AccountMove(models.Model):
         readonly=True,
         ondelete="set null",
     )
+    invoice_ocr_document_type = fields.Selection(
+        [
+            ("invoice", "Invoice"),
+            ("credit_note", "Credit Note"),
+            ("proforma", "Pro-forma"),
+            ("unknown", "Unknown"),
+        ],
+        copy=False,
+        tracking=True,
+    )
     can_send_to_invoice_ocr = fields.Boolean(
         compute="_compute_can_send_to_invoice_ocr",
     )
@@ -73,6 +83,20 @@ class AccountMove(models.Model):
         ):
             return self._decode_google_document_ai
         return None
+
+    def _post(self, soft=True):
+        proformas = self.filtered(
+            lambda move: move.invoice_ocr_document_type == "proforma"
+        )
+        if proformas:
+            raise UserError(
+                _(
+                    "A pro-forma document is not a vendor bill and cannot be posted. "
+                    "Replace it with the final invoice or explicitly reclassify it "
+                    "after review."
+                )
+            )
+        return super()._post(soft=soft)
 
     def _decode_google_document_ai(self, invoice, file_data, new=False):
         attachment = file_data.get("attachment")
@@ -142,6 +166,7 @@ class AccountMove(models.Model):
                 "invoice_ocr_attachment_id": attachment.id,
                 "invoice_ocr_attachment_checksum": checksum,
                 "invoice_ocr_duplicate_move_id": False,
+                "invoice_ocr_document_type": False,
                 "invoice_ocr_result": False,
                 "invoice_ocr_warnings": False,
                 "invoice_ocr_error": False,
@@ -283,15 +308,22 @@ class AccountMove(models.Model):
                 )
                 self.message_post(body=warning)
 
-    def _apply_normalized_invoice_ocr(self, result):
+    def _apply_normalized_invoice_ocr(self, result):  # noqa: C901
         entities = self._group_ocr_entities(result.get("entities", []))
         warnings = []
+        document_type = self._classify_ocr_document(result, entities)
+        self.invoice_ocr_document_type = document_type
+        is_proforma = document_type == "proforma"
         critical = (
-            "invoice_id",
-            "invoice_date",
-            "net_amount",
-            "total_tax_amount",
-            "total_amount",
+            ("invoice_date", "total_amount")
+            if is_proforma
+            else (
+                "invoice_id",
+                "invoice_date",
+                "net_amount",
+                "total_tax_amount",
+                "total_amount",
+            )
         )
         confidences = [
             entities[key][0].get("confidence", 0.0)
@@ -307,8 +339,10 @@ class AccountMove(models.Model):
             elif entities[key][0].get("confidence", 0.0) < threshold:
                 warnings.append(_("Low confidence for field: %s") % key)
 
-        supplier_entities = entities.get("supplier_tax_id") or entities.get(
-            "supplier_name", []
+        supplier_entities = (
+            entities.get("supplier_tax_id")
+            or entities.get("supplier_iban")
+            or entities.get("supplier_name", [])
         )
         if not supplier_entities:
             warnings.append(_("Google did not recognize the supplier identity."))
@@ -339,16 +373,6 @@ class AccountMove(models.Model):
         existing_product_lines = self.invoice_line_ids.filtered(
             lambda line: line.display_type == "product"
         )
-        if existing_product_lines:
-            warnings.append(
-                _("Existing invoice lines were kept; OCR lines were not added.")
-            )
-        else:
-            line_commands = self._prepare_ocr_line_commands(entities, warnings)
-            if line_commands:
-                values["invoice_line_ids"] = line_commands
-            else:
-                warnings.append(_("Google did not return usable invoice lines."))
         if values:
             self.write(values)
 
@@ -362,24 +386,193 @@ class AccountMove(models.Model):
             for entity in entities.get("purchase_order", [])
             if self._ocr_entity_value(entity)
         ]
-        if (
-            not existing_product_lines
-            and hasattr(self, "_find_and_set_purchase_orders")
-            and (po_references or supplier)
-        ):
-            self._find_and_set_purchase_orders(
-                po_references,
-                supplier.id if supplier else False,
-                total,
-                from_ocr=True,
+        purchase_orders = self._match_ocr_purchase_orders(
+            po_references, supplier, currency, total, warnings
+        )
+        duplicate = self._find_ocr_po_bill_duplicate(
+            purchase_orders, supplier, currency, total, warnings
+        )
+        if duplicate:
+            self.invoice_ocr_duplicate_move_id = duplicate
+            warnings.append(
+                _(
+                    "Purchase order %(purchase_order)s is already represented by "
+                    "vendor bill %(bill)s. OCR lines were not created."
+                )
+                % {
+                    "purchase_order": ", ".join(purchase_orders.mapped("name")),
+                    "bill": duplicate.display_name,
+                }
             )
+
+        if is_proforma:
+            warnings.append(
+                _(
+                    "This document is marked as pro-forma. It was retained for "
+                    "review, but accounting lines were not created and posting is "
+                    "blocked."
+                )
+            )
+        elif duplicate:
+            pass
+        elif existing_product_lines:
+            warnings.append(
+                _("Existing invoice lines were kept; OCR lines were not added.")
+            )
+        else:
+            if hasattr(self, "_find_and_set_purchase_orders") and (
+                purchase_orders or (not po_references and supplier)
+            ):
+                matched_po_references = purchase_orders.mapped("name")
+                method, _po_lines, _invoice_lines = self._match_purchase_orders(
+                    matched_po_references,
+                    supplier.id if supplier else False,
+                    total,
+                    True,
+                    10,
+                )
+                if method in ("total_match", "subset_total_match"):
+                    self._find_and_set_purchase_orders(
+                        matched_po_references,
+                        supplier.id if supplier else False,
+                        total,
+                        from_ocr=True,
+                    )
+                elif method == "po_match":
+                    warnings.append(
+                        _(
+                            "The purchase order reference matches, but its open lines "
+                            "do not match the extracted total. OCR lines were kept."
+                        )
+                    )
+            if not self.invoice_line_ids.filtered(
+                lambda line: line.display_type == "product"
+            ):
+                line_commands = self._prepare_ocr_line_commands(
+                    entities, warnings, supplier=supplier
+                )
+                if line_commands:
+                    with self._get_edi_creation() as invoice:
+                        invoice.invoice_line_ids = line_commands
+                else:
+                    warnings.append(_("Google did not return usable invoice lines."))
         self._match_ocr_partner_bank(entities, supplier, warnings)
-        self._check_ocr_totals(entities, warnings)
+        if not is_proforma and not duplicate:
+            self._check_ocr_totals(entities, warnings)
         if self.duplicated_ref_ids:
             warnings.append(
                 _("Odoo found another bill with the same supplier reference.")
             )
         return warnings, min(confidences) if confidences else 0.0
+
+    def _classify_ocr_document(self, result, entities):
+        invoice_type = str(
+            self._first_ocr_value(entities, "invoice_type") or ""
+        ).lower()
+        document_text = result.get("text") or ""
+        if "proforma" in invoice_type or re.search(
+            r"^\s*pro[\s-]*forma(?:\s+(?:invoice|factuur))?\s*$",
+            document_text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        ):
+            return "proforma"
+        total = self._ocr_float(self._first_ocr_value(entities, "total_amount"))
+        if "credit" in invoice_type or total < 0:
+            return "credit_note"
+        if entities.get("invoice_id") or entities.get("invoice_date"):
+            return "invoice"
+        return "unknown"
+
+    def _match_ocr_purchase_orders(
+        self, po_references, supplier, currency, total, warnings
+    ):
+        if not po_references:
+            return self.env["purchase.order"]
+        references = list(
+            dict.fromkeys(str(ref).strip() for ref in po_references if ref)
+        )
+        orders = self.env["purchase.order"].search(
+            [
+                ("company_id", "=", self.company_id.id),
+                ("state", "in", ("purchase", "done")),
+                "|",
+                ("name", "in", references),
+                ("partner_ref", "in", references),
+            ]
+        )
+        if supplier:
+            orders = orders.filtered(
+                lambda order: order.partner_id.commercial_partner_id
+                == supplier.commercial_partner_id
+            )
+        if currency:
+            orders = orders.filtered(lambda order: order.currency_id == currency)
+        if len(orders) > 1:
+            exact_total_orders = orders.filtered(
+                lambda order: not float_compare(
+                    abs(order.amount_total),
+                    abs(total),
+                    precision_rounding=order.currency_id.rounding,
+                )
+            )
+            if len(exact_total_orders) == 1:
+                return exact_total_orders
+            warnings.append(
+                _("Several purchase orders match the extracted reference and total.")
+            )
+            return self.env["purchase.order"]
+        if not orders:
+            warnings.append(
+                _(
+                    "No purchase order matches the extracted reference, supplier, "
+                    "currency, and total."
+                )
+            )
+        return orders
+
+    def _find_ocr_po_bill_duplicate(
+        self, purchase_orders, supplier, currency, total, warnings
+    ):
+        if len(purchase_orders) != 1:
+            return self.env["account.move"]
+        candidates = self.search(
+            [
+                ("id", "!=", self.id),
+                ("company_id", "=", self.company_id.id),
+                ("state", "!=", "cancel"),
+                ("move_type", "in", self.get_purchase_types(include_receipts=True)),
+                (
+                    "invoice_line_ids.purchase_line_id.order_id",
+                    "=",
+                    purchase_orders.id,
+                ),
+            ]
+        )
+        if supplier:
+            candidates = candidates.filtered(
+                lambda move: move.commercial_partner_id
+                == supplier.commercial_partner_id
+            )
+        if currency:
+            candidates = candidates.filtered(lambda move: move.currency_id == currency)
+        if total:
+            candidates = candidates.filtered(
+                lambda move: not float_compare(
+                    abs(move.amount_total),
+                    abs(total),
+                    precision_rounding=move.currency_id.rounding,
+                )
+            )
+        if len(candidates) == 1:
+            return candidates
+        if len(candidates) > 1:
+            warnings.append(
+                _(
+                    "Several existing bills match the extracted purchase order "
+                    "and total."
+                )
+            )
+        return self.env["account.move"]
 
     def _group_ocr_entities(self, entities):
         grouped = {}
@@ -478,6 +671,7 @@ class AccountMove(models.Model):
 
     def _match_ocr_supplier(self, entities):
         vat = self._first_ocr_value(entities, "supplier_tax_id")
+        iban = self._first_ocr_value(entities, "supplier_iban")
         name = self._first_ocr_value(entities, "supplier_name")
         email = self._first_ocr_value(entities, "supplier_email")
         phone = self._first_ocr_value(entities, "supplier_phone")
@@ -488,10 +682,23 @@ class AccountMove(models.Model):
         if vat:
             exact_vat = self.env["res.partner"].search(
                 company_domain + [("vat", "=ilike", vat)],
-                limit=2,
             )
-            if len(exact_vat) == 1:
-                return exact_vat, True
+            commercial_partners = exact_vat.commercial_partner_id
+            if len(commercial_partners) == 1:
+                return commercial_partners, True
+        if iban:
+            sanitized_iban = re.sub(r"[^A-Z0-9]", "", str(iban).upper())
+            banks = self.env["res.partner.bank"].search(
+                [("sanitized_acc_number", "=", sanitized_iban)]
+            )
+            commercial_partners = banks.partner_id.commercial_partner_id.filtered(
+                lambda partner: (
+                    not partner.company_id or partner.company_id == self.company_id
+                )
+                and partner.supplier_rank > 0
+            )
+            if len(commercial_partners) == 1:
+                return commercial_partners, True
         partner = self.env["res.partner"]._retrieve_partner(
             name=name,
             email=email,
@@ -499,7 +706,12 @@ class AccountMove(models.Model):
             vat=vat,
             company=self.company_id,
         )
-        return partner, False
+        commercial_partner = partner.commercial_partner_id
+        if partner and (
+            partner.supplier_rank > 0 or commercial_partner.supplier_rank > 0
+        ):
+            return commercial_partner, False
+        return self.env["res.partner"], False
 
     def _match_ocr_currency(self, entities, warnings):
         candidates = []
@@ -571,11 +783,15 @@ class AccountMove(models.Model):
             values["move_type"] = "in_refund"
         return values
 
-    def _prepare_ocr_line_commands(self, entities, warnings):
+    def _prepare_ocr_line_commands(  # noqa: C901
+        self, entities, warnings, supplier=False
+    ):
         invoice_tax_rates = self._get_ocr_invoice_tax_rates(entities, warnings)
+        historical_defaults = self._get_ocr_historical_line_defaults(supplier)
         commands = []
-        for entity in entities.get("line_item", []):
-            properties = self._group_ocr_entities(entity.get("properties", []))
+        for line in self._normalize_ocr_lines(entities, warnings):
+            entity = line["entity"]
+            properties = line["properties"]
             if (
                 entity.get("confidence", 0.0)
                 < self.company_id.invoice_ocr_confidence_threshold
@@ -596,18 +812,8 @@ class AccountMove(models.Model):
                         _("Low confidence for invoice line field: %s")
                         % property_type.removeprefix("line_item/")
                     )
-            description = self._first_ocr_value(
-                properties, "line_item/description"
-            ) or _("OCR invoice line")
-            quantity = (
-                self._ocr_float(
-                    self._first_ocr_value(properties, "line_item/quantity"),
-                    default=1.0,
-                    warnings=warnings,
-                    label=_("line quantity"),
-                )
-                or 1.0
-            )
+            description = line["description"] or _("OCR invoice line")
+            quantity = line["quantity"]
             unit_price = self._ocr_float(
                 self._first_ocr_value(properties, "line_item/unit_price"),
                 warnings=warnings,
@@ -647,12 +853,15 @@ class AccountMove(models.Model):
                     warnings.append(
                         _("Several products match extracted code %s.") % product_code
                     )
-            tax_rate = self._ocr_float(
-                self._first_ocr_value(properties, "line_item/tax_rate")
-            )
-            if not tax_rate and len(invoice_tax_rates) == 1:
+            if "product_id" not in line_values and historical_defaults.get(
+                "account_id"
+            ):
+                line_values["account_id"] = historical_defaults["account_id"]
+            tax_rate_value = self._first_ocr_value(properties, "line_item/tax_rate")
+            tax_rate = self._ocr_float(tax_rate_value, default=None)
+            if tax_rate is None and len(invoice_tax_rates) == 1:
                 tax_rate = invoice_tax_rates[0]
-            if tax_rate:
+            if tax_rate is not None:
                 taxes = self.env["account.tax"].search(
                     [
                         ("company_id", "=", self.company_id.id),
@@ -664,20 +873,159 @@ class AccountMove(models.Model):
                 if len(taxes) == 1:
                     line_values["tax_ids"] = [(6, 0, taxes.ids)]
                 elif len(taxes) > 1:
-                    warnings.append(
-                        _("Several purchase taxes match rate %s%%.") % tax_rate
-                    )
+                    historical_taxes = self.env["account.tax"]
+                    if "product_id" not in line_values:
+                        historical_taxes = taxes.filtered(
+                            lambda tax: tax.id in historical_defaults.get("tax_ids", [])
+                        )
+                        if not historical_taxes:
+                            historical_taxes = self._get_ocr_historical_taxes(
+                                taxes, supplier
+                            )
+                    if historical_taxes:
+                        line_values["tax_ids"] = [(6, 0, historical_taxes.ids)]
+                    else:
+                        warnings.append(
+                            _("Several purchase taxes match rate %s%%.") % tax_rate
+                        )
                 else:
                     warnings.append(_("No purchase tax matches rate %s%%.") % tax_rate)
+            elif "product_id" not in line_values and historical_defaults.get("tax_ids"):
+                line_values["tax_ids"] = [(6, 0, historical_defaults["tax_ids"])]
             commands.append((0, 0, line_values))
         return commands
+
+    def _normalize_ocr_lines(self, entities, warnings):
+        lines = []
+        for entity in entities.get("line_item", []):
+            properties = self._group_ocr_entities(entity.get("properties", []))
+            description = self._first_ocr_value(properties, "line_item/description")
+            product_code = self._first_ocr_value(properties, "line_item/product_code")
+            quantity_value = self._first_ocr_value(properties, "line_item/quantity")
+            unit_price_value = self._first_ocr_value(properties, "line_item/unit_price")
+            amount_value = self._first_ocr_value(properties, "line_item/amount")
+            if not any(
+                value not in (False, None, "")
+                for value in (
+                    description,
+                    product_code,
+                    quantity_value,
+                    unit_price_value,
+                    amount_value,
+                )
+            ):
+                continue
+            lines.append(
+                {
+                    "entity": entity,
+                    "properties": properties,
+                    "description": description,
+                    "product_code": product_code,
+                    "quantity_value": quantity_value,
+                    "unit_price_value": unit_price_value,
+                    "amount_value": amount_value,
+                }
+            )
+
+        merged = []
+        for line in lines:
+            pricing_only = (
+                not line["description"]
+                and not line["product_code"]
+                and line["quantity_value"] in (False, None, "")
+                and (
+                    line["unit_price_value"] not in (False, None, "")
+                    or line["amount_value"] not in (False, None, "")
+                )
+            )
+            if (
+                pricing_only
+                and merged
+                and merged[-1]["unit_price_value"] in (False, None, "")
+                and merged[-1]["amount_value"] in (False, None, "")
+            ):
+                previous = merged[-1]
+                previous["unit_price_value"] = line["unit_price_value"]
+                previous["amount_value"] = line["amount_value"]
+                for key, values in line["properties"].items():
+                    previous["properties"].setdefault(key, []).extend(values)
+                continue
+            merged.append(line)
+
+        usable_lines = [
+            line
+            for line in merged
+            if line["unit_price_value"] not in (False, None, "")
+            or line["amount_value"] not in (False, None, "")
+        ]
+        for line in usable_lines:
+            line["quantity"] = (
+                self._ocr_float(
+                    line["quantity_value"],
+                    default=1.0,
+                    warnings=warnings,
+                    label=_("line quantity"),
+                )
+                or 1.0
+            )
+        return usable_lines
+
+    def _get_ocr_historical_line_defaults(self, supplier):
+        if not supplier:
+            return {}
+        lines = self.env["account.move.line"].search(
+            [
+                ("move_id.company_id", "=", self.company_id.id),
+                ("move_id.state", "=", "posted"),
+                ("move_id.move_type", "in", ("in_invoice", "in_refund")),
+                (
+                    "move_id.commercial_partner_id",
+                    "=",
+                    supplier.commercial_partner_id.id,
+                ),
+                ("display_type", "=", "product"),
+                ("account_id", "!=", False),
+            ],
+            order="date desc, id desc",
+            limit=100,
+        )
+        patterns = {
+            (line.account_id.id, tuple(sorted(line.tax_ids.ids))) for line in lines
+        }
+        if len(patterns) != 1:
+            return {}
+        account_id, tax_ids = patterns.pop()
+        return {"account_id": account_id, "tax_ids": list(tax_ids)}
+
+    def _get_ocr_historical_taxes(self, candidate_taxes, supplier):
+        if not supplier or not candidate_taxes:
+            return self.env["account.tax"]
+        lines = self.env["account.move.line"].search(
+            [
+                ("move_id.company_id", "=", self.company_id.id),
+                ("move_id.state", "=", "posted"),
+                ("move_id.move_type", "in", ("in_invoice", "in_refund")),
+                (
+                    "move_id.commercial_partner_id",
+                    "=",
+                    supplier.commercial_partner_id.id,
+                ),
+                ("display_type", "=", "product"),
+                ("tax_ids", "in", candidate_taxes.ids),
+            ]
+        )
+        historical_taxes = lines.tax_ids & candidate_taxes
+        return (
+            historical_taxes if len(historical_taxes) == 1 else self.env["account.tax"]
+        )
 
     def _get_ocr_invoice_tax_rates(self, entities, warnings):
         rates = []
         for vat_entity in entities.get("vat", []):
             properties = self._group_ocr_entities(vat_entity.get("properties", []))
-            rate = self._ocr_float(self._first_ocr_value(properties, "vat/tax_rate"))
-            if rate and rate not in rates:
+            rate_value = self._first_ocr_value(properties, "vat/tax_rate")
+            rate = self._ocr_float(rate_value, default=None)
+            if rate is not None and rate not in rates:
                 rates.append(rate)
         extracted_tax = self._ocr_float(
             self._first_ocr_value(entities, "total_tax_amount")
@@ -699,15 +1047,21 @@ class AccountMove(models.Model):
         iban = self._first_ocr_value(entities, "supplier_iban")
         if not iban or not supplier:
             return
-        normalized = re.sub(r"\s+", "", iban).upper()
-        bank = supplier.bank_ids.filtered(
-            lambda item: re.sub(r"\s+", "", item.acc_number or "").upper() == normalized
-        )[:1]
-        if bank:
-            self.partner_bank_id = bank
+        normalized = re.sub(r"[^A-Z0-9]", "", str(iban).upper())
+        banks = self.env["res.partner.bank"].search(
+            [
+                ("partner_id.commercial_partner_id", "=", supplier.id),
+                ("sanitized_acc_number", "=", normalized),
+            ]
+        )
+        if len(banks) == 1:
+            self.partner_bank_id = banks
         else:
             warnings.append(
-                _("The extracted IBAN is not registered for the matched supplier.")
+                _(
+                    "The extracted IBAN is not uniquely registered for the matched "
+                    "supplier."
+                )
             )
 
     def _check_ocr_totals(self, entities, warnings):

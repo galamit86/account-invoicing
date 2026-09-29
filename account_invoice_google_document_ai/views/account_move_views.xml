@@ -18,6 +18,11 @@
                 <field name="can_send_to_invoice_ocr" invisible="1" />
                 <field name="invoice_ocr_state" readonly="1" />
                 <field
+                    name="invoice_ocr_document_type"
+                    readonly="state != 'draft'"
+                    invisible="not invoice_ocr_state"
+                />
+                <field
                     name="invoice_ocr_min_confidence"
                     readonly="1"
                     invisible="not invoice_ocr_state"
@@ -38,6 +43,64 @@
                     invisible="not invoice_ocr_error"
                 />
             </field>
+        </field>
+    </record>
+
+    <record id="account_move_list_view_invoice_ocr" model="ir.ui.view">
+        <field name="name">account.move.list.invoice.ocr</field>
+        <field name="model">account.move</field>
+        <field name="inherit_id" ref="account.view_invoice_tree" />
+        <field name="arch" type="xml">
+            <field name="checked" position="before">
+                <field
+                    name="invoice_ocr_state"
+                    string="OCR"
+                    widget="badge"
+                    optional="show"
+                    column_invisible="context.get('default_move_type') not in ('in_invoice', 'in_refund', 'in_receipt')"
+                    decoration-info="invoice_ocr_state in ('pending', 'processing', 'extracted')"
+                    decoration-warning="invoice_ocr_state == 'review'"
+                    decoration-success="invoice_ocr_state == 'done'"
+                    decoration-danger="invoice_ocr_state == 'error'"
+                />
+            </field>
+        </field>
+    </record>
+
+    <record id="account_move_search_view_invoice_ocr" model="ir.ui.view">
+        <field name="name">account.move.search.invoice.ocr</field>
+        <field name="model">account.move</field>
+        <field name="inherit_id" ref="account.view_account_invoice_filter" />
+        <field name="arch" type="xml">
+            <filter name="draft" position="before">
+                <filter
+                    name="invoice_ocr_processing"
+                    string="OCR Processing"
+                    domain="[('invoice_ocr_state', 'in', ('pending', 'processing', 'extracted'))]"
+                    invisible="context.get('default_move_type') not in ('in_invoice', 'in_refund', 'in_receipt')"
+                />
+                <filter
+                    name="invoice_ocr_review"
+                    string="OCR Review Required"
+                    domain="[('invoice_ocr_state', '=', 'review')]"
+                    invisible="context.get('default_move_type') not in ('in_invoice', 'in_refund', 'in_receipt')"
+                />
+                <filter
+                    name="invoice_ocr_failed"
+                    string="OCR Failed"
+                    domain="[('invoice_ocr_state', '=', 'error')]"
+                    invisible="context.get('default_move_type') not in ('in_invoice', 'in_refund', 'in_receipt')"
+                />
+                <separator />
+            </filter>
+            <filter name="status" position="after">
+                <filter
+                    name="group_by_invoice_ocr_state"
+                    string="OCR Status"
+                    context="{'group_by': 'invoice_ocr_state'}"
+                    invisible="context.get('default_move_type') not in ('in_invoice', 'in_refund', 'in_receipt')"
+                />
+            </filter>
         </field>
     </record>
 </odoo>

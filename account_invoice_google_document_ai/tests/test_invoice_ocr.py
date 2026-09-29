@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from google.api_core import exceptions as google_exceptions
 from google.cloud import documentai_v1 as documentai
 
-from odoo import Command
+from odoo import Command, fields
 from odoo.exceptions import UserError, ValidationError
 from odoo.tests import TransactionCase, tagged
 
@@ -135,6 +135,434 @@ class TestInvoiceGoogleDocumentAI(TransactionCase):
         self.assertEqual(len(move.invoice_line_ids), 1)
         self.assertTrue(move.invoice_line_ids.is_imported)
         self.assertEqual(move.invoice_ocr_state, "done")
+        self.assertEqual(move.invoice_ocr_document_type, "invoice")
+
+    def test_vat_on_contacts_resolves_to_one_commercial_supplier(self):
+        self.env["res.partner"].create(
+            {
+                "name": "OCR Vendor Contact 1",
+                "parent_id": self.vendor.id,
+                "vat": self.vendor.vat,
+                "supplier_rank": 1,
+            }
+        )
+        self.env["res.partner"].create(
+            {
+                "name": "OCR Vendor Contact 2",
+                "parent_id": self.vendor.id,
+                "vat": self.vendor.vat,
+                "supplier_rank": 1,
+            }
+        )
+        move, attachment = self._create_move_and_attachment()
+        entities = move._group_ocr_entities(
+            [self._entity("supplier_tax_id", self.vendor.vat)]
+        )
+
+        supplier, strong_match = move._match_ocr_supplier(entities)
+
+        self.assertEqual(supplier, self.vendor)
+        self.assertTrue(strong_match)
+
+    def test_unique_iban_matches_supplier(self):
+        bank_contact = self.env["res.partner"].create(
+            {
+                "name": "OCR Vendor Bank Contact",
+                "parent_id": self.vendor.id,
+            }
+        )
+        bank = self.env["res.partner.bank"].create(
+            {
+                "partner_id": bank_contact.id,
+                "acc_number": "NL91 ABNA 0417 1643 00",
+            }
+        )
+        move, attachment = self._create_move_and_attachment()
+        entities = move._group_ocr_entities(
+            [self._entity("supplier_iban", "NL91ABNA0417164300")]
+        )
+
+        supplier, strong_match = move._match_ocr_supplier(entities)
+        warnings = []
+        move._match_ocr_partner_bank(entities, supplier, warnings)
+
+        self.assertEqual(supplier, self.vendor)
+        self.assertTrue(strong_match)
+        self.assertEqual(move.partner_bank_id, bank)
+        self.assertFalse(warnings)
+
+    def test_name_fallback_rejects_customer_only_partner(self):
+        customer = self.env["res.partner"].create(
+            {"name": "OCR Customer Only", "supplier_rank": 0}
+        )
+        move, _attachment = self._create_move_and_attachment()
+        entities = move._group_ocr_entities(
+            [self._entity("supplier_name", customer.name)]
+        )
+
+        supplier, strong_match = move._match_ocr_supplier(entities)
+
+        self.assertFalse(supplier)
+        self.assertFalse(strong_match)
+
+    def test_complementary_line_fragments_are_merged(self):
+        move, attachment = self._create_move_and_attachment()
+        result = self._result()
+        result["entities"] = [
+            entity for entity in result["entities"] if entity["type"] != "line_item"
+        ]
+        result["entities"] += [
+            self._entity(
+                "line_item",
+                "Subscription 1",
+                properties=[
+                    self._entity("line_item/description", "Subscription"),
+                    self._entity("line_item/quantity", 1),
+                ],
+            ),
+            self._entity(
+                "line_item",
+                "100.00",
+                properties=[self._entity("line_item/amount", 100)],
+            ),
+            self._entity(
+                "line_item",
+                "PO123",
+                properties=[self._entity("line_item/purchase_order", "PO123")],
+            ),
+        ]
+        move.write(
+            {
+                "invoice_ocr_state": "extracted",
+                "invoice_ocr_attachment_id": attachment.id,
+                "invoice_ocr_result": json.dumps(result),
+            }
+        )
+
+        move._apply_invoice_ocr_result()
+
+        self.assertEqual(len(move.invoice_line_ids), 1)
+        self.assertEqual(move.invoice_line_ids.name, "Subscription")
+        self.assertEqual(move.invoice_line_ids.quantity, 1)
+        self.assertEqual(move.invoice_line_ids.price_unit, 100)
+
+    def test_proforma_is_kept_without_lines_and_cannot_be_posted(self):
+        move, attachment = self._create_move_and_attachment()
+        result = self._result()
+        result["text"] = "PRO FORMA FACTUUR"
+        result["entities"] = [
+            entity
+            for entity in result["entities"]
+            if entity["type"] not in ("invoice_id", "net_amount", "total_tax_amount")
+        ]
+        move.write(
+            {
+                "invoice_ocr_state": "extracted",
+                "invoice_ocr_attachment_id": attachment.id,
+                "invoice_ocr_result": json.dumps(result),
+            }
+        )
+
+        move._apply_invoice_ocr_result()
+
+        self.assertEqual(move.invoice_ocr_document_type, "proforma")
+        self.assertEqual(move.invoice_ocr_state, "review")
+        self.assertFalse(move.invoice_line_ids)
+        with self.assertRaisesRegex(UserError, "pro-forma"):
+            move._post()
+
+    def test_reference_to_proforma_does_not_block_final_invoice(self):
+        move, _attachment = self._create_move_and_attachment()
+        result = self._result()
+        result["text"] = "FINAL INVOICE\nThis invoice replaces pro forma PF-001."
+        entities = move._group_ocr_entities(result["entities"])
+
+        document_type = move._classify_ocr_document(result, entities)
+
+        self.assertEqual(document_type, "invoice")
+
+    def test_existing_bill_for_purchase_order_is_linked_as_duplicate(self):
+        expense_account = self.env["account.account"].search(
+            [
+                ("company_ids", "in", self.company.id),
+                ("account_type", "=", "expense"),
+            ],
+            limit=1,
+        )
+        product = self.env["product.product"].create(
+            {
+                "name": "OCR Purchase Product",
+                "is_storable": True,
+            }
+        )
+        purchase_order = self.env["purchase.order"].create(
+            {
+                "partner_id": self.vendor.id,
+                "currency_id": self.company.currency_id.id,
+                "order_line": [
+                    Command.create(
+                        {
+                            "name": product.name,
+                            "product_id": product.id,
+                            "product_qty": 1,
+                            "product_uom": product.uom_po_id.id,
+                            "price_unit": 100,
+                            "taxes_id": [Command.clear()],
+                            "date_planned": fields.Datetime.now(),
+                        }
+                    )
+                ],
+            }
+        )
+        purchase_order.button_confirm()
+        existing_bill = self.env["account.move"].create(
+            {
+                "move_type": "in_invoice",
+                "company_id": self.company.id,
+                "journal_id": self.purchase_journal.id,
+                "partner_id": self.vendor.id,
+                "currency_id": self.company.currency_id.id,
+                "invoice_line_ids": [
+                    Command.create(
+                        {
+                            "name": product.name,
+                            "product_id": product.id,
+                            "account_id": expense_account.id,
+                            "quantity": 1,
+                            "price_unit": 100,
+                            "purchase_line_id": purchase_order.order_line.id,
+                            "tax_ids": [Command.clear()],
+                        }
+                    )
+                ],
+            }
+        )
+        move, attachment = self._create_move_and_attachment()
+        result = self._result()
+        result["entities"].append(self._entity("purchase_order", purchase_order.name))
+        move.write(
+            {
+                "invoice_ocr_state": "extracted",
+                "invoice_ocr_attachment_id": attachment.id,
+                "invoice_ocr_result": json.dumps(result),
+            }
+        )
+
+        move._apply_invoice_ocr_result()
+
+        self.assertEqual(move.invoice_ocr_duplicate_move_id, existing_bill)
+        self.assertFalse(move.invoice_line_ids)
+        self.assertEqual(move.invoice_ocr_state, "review")
+        self.assertIn("already represented", move.invoice_ocr_warnings)
+
+    def test_po_reference_only_match_does_not_replace_ocr_lines(self):
+        product = self.env["product.product"].create(
+            {
+                "name": "OCR Mismatched Purchase Product",
+                "is_storable": True,
+            }
+        )
+        purchase_order = self.env["purchase.order"].create(
+            {
+                "partner_id": self.vendor.id,
+                "currency_id": self.company.currency_id.id,
+                "order_line": [
+                    Command.create(
+                        {
+                            "name": product.name,
+                            "product_id": product.id,
+                            "product_qty": 1,
+                            "product_uom": product.uom_po_id.id,
+                            "price_unit": 200,
+                            "date_planned": fields.Datetime.now(),
+                        }
+                    )
+                ],
+            }
+        )
+        purchase_order.button_confirm()
+        move, attachment = self._create_move_and_attachment()
+        result = self._result()
+        result["entities"].append(self._entity("purchase_order", purchase_order.name))
+        move.write(
+            {
+                "invoice_ocr_state": "extracted",
+                "invoice_ocr_attachment_id": attachment.id,
+                "invoice_ocr_result": json.dumps(result),
+            }
+        )
+
+        move._apply_invoice_ocr_result()
+
+        self.assertEqual(len(move.invoice_line_ids), 1)
+        self.assertFalse(move.invoice_line_ids.purchase_line_id)
+        self.assertIn("open lines do not match", move.invoice_ocr_warnings)
+
+    def test_supplier_history_disambiguates_account_and_tax(self):
+        historical_vendor = self.env["res.partner"].create(
+            {"name": "Historical OCR Vendor", "supplier_rank": 1}
+        )
+        expense_account = self.env["account.account"].search(
+            [
+                ("company_ids", "in", self.company.id),
+                ("account_type", "=", "expense"),
+            ],
+            limit=1,
+        )
+        selected_tax = self.env["account.tax"].create(
+            {
+                "name": "OCR purchase tax selected",
+                "company_id": self.company.id,
+                "type_tax_use": "purchase",
+                "amount_type": "percent",
+                "amount": 17.5,
+            }
+        )
+        self.env["account.tax"].create(
+            {
+                "name": "OCR purchase tax duplicate",
+                "company_id": self.company.id,
+                "type_tax_use": "purchase",
+                "amount_type": "percent",
+                "amount": 17.5,
+            }
+        )
+        historical_bill = self.env["account.move"].create(
+            {
+                "move_type": "in_invoice",
+                "company_id": self.company.id,
+                "journal_id": self.purchase_journal.id,
+                "partner_id": historical_vendor.id,
+                "invoice_date": fields.Date.today(),
+                "ref": "HISTORY-001",
+                "invoice_line_ids": [
+                    Command.create(
+                        {
+                            "name": "Historical service",
+                            "account_id": expense_account.id,
+                            "quantity": 1,
+                            "price_unit": 100,
+                            "tax_ids": [Command.set(selected_tax.ids)],
+                        }
+                    )
+                ],
+            }
+        )
+        historical_bill.action_post()
+        move, attachment = self._create_move_and_attachment()
+        entities = move._group_ocr_entities(
+            [
+                self._entity(
+                    "vat",
+                    "17.5",
+                    properties=[self._entity("vat/tax_rate", 17.5)],
+                ),
+                self._entity(
+                    "line_item",
+                    "Historical service 100",
+                    properties=[
+                        self._entity("line_item/description", "Historical service"),
+                        self._entity("line_item/amount", 100),
+                    ],
+                ),
+            ]
+        )
+        warnings = []
+        historical_defaults = move._get_ocr_historical_line_defaults(historical_vendor)
+
+        with patch.object(
+            type(move), "_get_ocr_historical_line_defaults", return_value={}
+        ):
+            commands = move._prepare_ocr_line_commands(
+                entities, warnings, supplier=historical_vendor
+            )
+
+        line_values = commands[0][2]
+        self.assertEqual(historical_defaults["account_id"], expense_account.id)
+        self.assertEqual(line_values["tax_ids"], [(6, 0, selected_tax.ids)])
+        self.assertNotIn("Several purchase taxes", "\n".join(warnings))
+
+        result = {
+            "text": "invoice",
+            "entities": [
+                self._entity("supplier_name", historical_vendor.name),
+                self._entity("receiver_tax_id", self.company.vat),
+                self._entity("invoice_id", "HISTORY-002"),
+                self._entity("invoice_date", fields.Date.today()),
+                self._entity("currency", self.company.currency_id.name),
+                self._entity("net_amount", 100),
+                self._entity("total_tax_amount", 17.5),
+                self._entity("total_amount", 117.5),
+                self._entity(
+                    "vat",
+                    "17.5",
+                    properties=[self._entity("vat/tax_rate", 17.5)],
+                ),
+                self._entity(
+                    "line_item",
+                    "Historical service 100",
+                    properties=[
+                        self._entity("line_item/description", "Historical service"),
+                        self._entity("line_item/amount", 100),
+                    ],
+                ),
+            ],
+        }
+        move.write(
+            {
+                "invoice_ocr_state": "extracted",
+                "invoice_ocr_attachment_id": attachment.id,
+                "invoice_ocr_result": json.dumps(result, default=str),
+            }
+        )
+
+        move._apply_invoice_ocr_result()
+
+        self.assertNotEqual(move.invoice_ocr_state, "error")
+        self.assertEqual(move.invoice_line_ids.account_id, expense_account)
+        self.assertEqual(move.invoice_line_ids.tax_ids, selected_tax)
+        self.assertEqual(move.amount_total, 117.5)
+
+    def test_zero_rate_does_not_reuse_historical_nonzero_tax(self):
+        nonzero_tax = self.env["account.tax"].search(
+            [
+                ("company_id", "=", self.company.id),
+                ("type_tax_use", "=", "purchase"),
+                ("amount", "!=", 0),
+            ],
+            limit=1,
+        )
+        move, _attachment = self._create_move_and_attachment()
+        entities = move._group_ocr_entities(
+            [
+                self._entity(
+                    "vat",
+                    "0",
+                    properties=[self._entity("vat/tax_rate", 0)],
+                ),
+                self._entity(
+                    "line_item",
+                    "Exempt service 100",
+                    properties=[
+                        self._entity("line_item/description", "Exempt service"),
+                        self._entity("line_item/amount", 100),
+                    ],
+                ),
+            ]
+        )
+        warnings = []
+
+        with patch.object(
+            type(move),
+            "_get_ocr_historical_line_defaults",
+            return_value={"tax_ids": nonzero_tax.ids},
+        ):
+            commands = move._prepare_ocr_line_commands(
+                entities, warnings, supplier=self.vendor
+            )
+
+        tax_command = commands[0][2].get("tax_ids")
+        self.assertNotEqual(tax_command, [(6, 0, nonzero_tax.ids)])
 
     def test_manual_line_is_not_deleted_or_duplicated(self):
         move, attachment = self._create_move_and_attachment()
