@@ -400,6 +400,7 @@ class TestInvoiceGoogleDocumentAI(TransactionCase):
     def test_connection_permission_error_is_actionable(self):
         service = self.env["account.invoice.google.document.ai"]
         client = MagicMock()
+        client.processor_path.return_value = "processors/test-processor"
         client.process_document.side_effect = google_exceptions.PermissionDenied(
             "documentai.processors.processOnline denied"
         )
@@ -413,6 +414,7 @@ class TestInvoiceGoogleDocumentAI(TransactionCase):
     def test_connection_missing_processor_error_is_actionable(self):
         service = self.env["account.invoice.google.document.ai"]
         client = MagicMock()
+        client.processor_path.return_value = "processors/test-processor"
         client.process_document.side_effect = google_exceptions.NotFound(
             "processor not found"
         )
