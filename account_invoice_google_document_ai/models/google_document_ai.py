@@ -3,24 +3,57 @@
 # Copyright 2026 Roetz
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 
+import base64
+import json
 from decimal import Decimal
 
 from google.api_core import exceptions as google_exceptions
 from google.api_core.client_options import ClientOptions
 from google.cloud import documentai_v1 as documentai
+from google.oauth2 import service_account
 
-from odoo import models
+from odoo import _, models
 
 
 class AccountInvoiceGoogleDocumentAI(models.AbstractModel):
     _name = "account.invoice.google.document.ai"
     _description = "Google Document AI invoice extraction service"
 
-    def _process_document(self, attachment, company):
+    def _get_credentials(self, company):
+        if not company.invoice_ocr_google_credentials:
+            raise ValueError(_("Upload a Google service-account JSON file."))
+        try:
+            raw = base64.b64decode(company.invoice_ocr_google_credentials)
+            values = json.loads(raw.decode("utf-8"))
+            if values.get("type") != "service_account":
+                raise ValueError
+            return service_account.Credentials.from_service_account_info(
+                values,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+        except (TypeError, ValueError, UnicodeDecodeError) as error:
+            raise ValueError(
+                _("The uploaded file is not a valid Google service-account JSON file.")
+            ) from error
+
+    def _get_client(self, company):
         endpoint = f"{company.invoice_ocr_google_location}-documentai.googleapis.com"
-        client = documentai.DocumentProcessorServiceClient(
+        return documentai.DocumentProcessorServiceClient(
             client_options=ClientOptions(api_endpoint=endpoint),
+            credentials=self._get_credentials(company),
         )
+
+    def _test_connection(self, company):
+        client = self._get_client(company)
+        processor_name = client.processor_path(
+            company.invoice_ocr_google_project,
+            company.invoice_ocr_google_location,
+            company.invoice_ocr_google_processor,
+        )
+        client.get_processor(request={"name": processor_name}, timeout=30)
+
+    def _process_document(self, attachment, company):
+        client = self._get_client(company)
         if company.invoice_ocr_google_processor_version:
             processor_name = client.processor_version_path(
                 company.invoice_ocr_google_project,

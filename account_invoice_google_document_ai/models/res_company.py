@@ -3,7 +3,8 @@
 # Copyright 2026 Roetz
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 
-from odoo import fields, models
+from odoo import api, fields, models
+from odoo.exceptions import ValidationError
 
 
 class ResCompany(models.Model):
@@ -28,6 +29,21 @@ class ResCompany(models.Model):
     invoice_ocr_google_processor_version = fields.Char(
         help="Pin a processor version to keep extraction behavior stable.",
     )
+    invoice_ocr_google_credentials = fields.Binary(
+        string="Service Account JSON",
+        attachment=False,
+        copy=False,
+        groups="base.group_system",
+        help=(
+            "Google service-account JSON used only for invoice extraction. "
+            "The private key is stored in the database and its backups."
+        ),
+    )
+    invoice_ocr_google_credentials_filename = fields.Char(
+        string="Service Account Filename",
+        copy=False,
+        groups="base.group_system",
+    )
     invoice_ocr_confidence_threshold = fields.Float(
         default=0.80,
         help="Critical fields below this confidence require review.",
@@ -38,3 +54,12 @@ class ResCompany(models.Model):
             "company and supplier native auto-post settings must also permit it."
         ),
     )
+
+    @api.constrains("invoice_ocr_google_credentials")
+    def _check_invoice_ocr_google_credentials(self):
+        service = self.env["account.invoice.google.document.ai"]
+        for company in self.filtered("invoice_ocr_google_credentials"):
+            try:
+                service._get_credentials(company)
+            except ValueError as error:
+                raise ValidationError(str(error)) from error

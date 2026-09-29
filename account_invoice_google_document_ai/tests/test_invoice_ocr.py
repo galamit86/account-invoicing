@@ -3,9 +3,11 @@
 
 import base64
 import json
+from unittest.mock import MagicMock, patch
 
 from google.cloud import documentai_v1 as documentai
 
+from odoo.exceptions import ValidationError
 from odoo.tests import TransactionCase, tagged
 
 from odoo.addons.queue_job.tests.common import trap_jobs
@@ -286,3 +288,69 @@ class TestInvoiceGoogleDocumentAI(TransactionCase):
 
         self.assertEqual(move.invoice_ocr_state, "review")
         self.assertIn("total_tax_amount", move.invoice_ocr_warnings)
+
+    def test_service_account_json_is_used_for_module_client(self):
+        credential_values = {
+            "type": "service_account",
+            "project_id": "test-project",
+            "client_email": "invoice-ocr@test-project.iam.gserviceaccount.com",
+            "private_key": "test-private-key",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+        encoded = base64.b64encode(json.dumps(credential_values).encode())
+        credentials = MagicMock()
+        service = self.env["account.invoice.google.document.ai"]
+        credentials_path = (
+            "odoo.addons.account_invoice_google_document_ai.models."
+            "google_document_ai.service_account.Credentials."
+            "from_service_account_info"
+        )
+        client_path = (
+            "odoo.addons.account_invoice_google_document_ai.models."
+            "google_document_ai.documentai.DocumentProcessorServiceClient"
+        )
+
+        with patch(credentials_path, return_value=credentials) as from_info:
+            self.company.invoice_ocr_google_credentials = encoded
+            with patch(client_path) as client:
+                service._get_client(self.company)
+
+        from_info.assert_called()
+        self.assertEqual(from_info.call_args.args[0], credential_values)
+        self.assertEqual(client.call_args.kwargs["credentials"], credentials)
+
+    def test_invalid_service_account_json_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            with self.env.cr.savepoint():
+                self.company.invoice_ocr_google_credentials = base64.b64encode(
+                    b'{"type": "authorized_user"}'
+                )
+
+    def test_missing_service_account_json_marks_job_failed(self):
+        move, attachment = self._create_move_and_attachment()
+        self.company.invoice_ocr_google_credentials = False
+        move.write(
+            {
+                "invoice_ocr_state": "pending",
+                "invoice_ocr_attachment_id": attachment.id,
+            }
+        )
+
+        move._extract_invoice_with_google(attachment.id)
+
+        self.assertEqual(move.invoice_ocr_state, "error")
+        self.assertIn("service-account JSON", move.invoice_ocr_error)
+
+    def test_settings_connection_action_checks_company_processor(self):
+        settings = self.env["res.config.settings"].create(
+            {"company_id": self.company.id}
+        )
+        service = self.env["account.invoice.google.document.ai"]
+
+        with patch.object(type(service), "_test_connection") as test_connection:
+            action = settings.action_test_invoice_ocr_google_connection()
+
+        test_connection.assert_called_once()
+        self.assertEqual(test_connection.call_args.args[1], self.company)
+        self.assertEqual(action["tag"], "display_notification")
+        self.assertEqual(action["params"]["type"], "success")

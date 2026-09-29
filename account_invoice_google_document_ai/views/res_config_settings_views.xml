@@ -47,6 +47,25 @@
                         </div>
                         <div class="row mt16">
                             <label
+                                for="invoice_ocr_google_credentials"
+                                class="col-lg-3 o_light_label"
+                            />
+                            <field
+                                name="invoice_ocr_google_credentials"
+                                filename="invoice_ocr_google_credentials_filename"
+                            />
+                            <field
+                                name="invoice_ocr_google_credentials_filename"
+                                invisible="1"
+                            />
+                        </div>
+                        <div class="alert alert-warning mt8" role="alert">
+                            The service-account private key is stored in the Odoo
+                            database and its backups. Restrict backup access and rotate
+                            the key when access changes.
+                        </div>
+                        <div class="row mt16">
+                            <label
                                 for="invoice_ocr_confidence_threshold"
                                 class="col-lg-3 o_light_label"
                             />
@@ -59,9 +78,13 @@
                             />
                             <field name="invoice_ocr_auto_post" />
                         </div>
-                        <div class="text-muted mt8">
-                            Authentication uses Google Application Default Credentials configured on the Odoo host.
-                        </div>
+                        <button
+                            name="action_test_invoice_ocr_google_connection"
+                            string="Test Google Connection"
+                            type="object"
+                            class="btn-secondary mt8"
+                            invisible="not invoice_ocr_google_credentials or not invoice_ocr_google_project or not invoice_ocr_google_processor"
+                        />
                     </div>
                 </setting>
             </setting>

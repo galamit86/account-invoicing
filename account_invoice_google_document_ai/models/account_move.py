@@ -180,6 +180,10 @@ class AccountMove(models.Model):
                 (company.invoice_ocr_google_project, _("Google project")),
                 (company.invoice_ocr_google_location, _("Google location")),
                 (company.invoice_ocr_google_processor, _("Google processor")),
+                (
+                    company.invoice_ocr_google_credentials,
+                    _("Google service-account JSON"),
+                ),
             )
             if not value
         ]

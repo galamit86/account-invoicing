@@ -399,17 +399,21 @@ invoice lines are never replaced by a repeated extraction.</p>
 <li>Enable the Document AI API in a Google Cloud project.</li>
 <li>Create an Invoice Parser processor, preferably in the <tt class="docutils literal">eu</tt>
 multi-region.</li>
-<li>Grant the Odoo runtime identity <tt class="docutils literal">roles/documentai.apiUser</tt>.</li>
-<li>Configure Application Default Credentials for the Odoo process.
-Service-account private keys are intentionally not stored in Odoo.</li>
+<li>Create a dedicated service account and grant it
+<tt class="docutils literal">roles/documentai.apiUser</tt>.</li>
+<li>Create a JSON key for that service account.</li>
 <li>Load <tt class="docutils literal">queue_job</tt> as a server-wide module and configure its job
 runner.</li>
 <li>In <em>Accounting &gt; Configuration &gt; Settings</em>, configure the project,
-location, processor, optional pinned processor version, and
-confidence threshold.</li>
+location, processor, optional pinned processor version, confidence
+threshold, and upload the service-account JSON.</li>
+<li>Click <strong>Test Google Connection</strong> before enabling extraction.</li>
 <li>Keep automatic posting disabled until representative invoices have
 been validated.</li>
 </ol>
+<p>The service-account private key is stored in the Odoo database and its
+backups. Restrict administrator and backup access, use a dedicated
+least-privilege service account, and rotate the key when access changes.</p>
 </div>
 <div class="section" id="bug-tracker">
 <h1><a class="toc-backref" href="#toc-entry-2">Bug Tracker</a></h1>
