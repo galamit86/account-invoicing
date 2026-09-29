@@ -351,6 +351,6 @@ class TestInvoiceGoogleDocumentAI(TransactionCase):
             action = settings.action_test_invoice_ocr_google_connection()
 
         test_connection.assert_called_once()
-        self.assertEqual(test_connection.call_args.args[1], self.company)
+        self.assertEqual(test_connection.call_args.args[0], self.company)
         self.assertEqual(action["tag"], "display_notification")
         self.assertEqual(action["params"]["type"], "success")
