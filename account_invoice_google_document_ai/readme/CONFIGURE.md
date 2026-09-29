@@ -9,7 +9,9 @@
 6.  In *Accounting \> Configuration \> Settings*, configure the project,
     location, processor, optional pinned processor version, confidence
     threshold, and upload the service-account JSON.
-7.  Click **Test Google Connection** before enabling extraction.
+7.  Click **Test Google Connection** before enabling extraction. The test
+    sends a small one-page image to the configured processor and can incur
+    one page of Document AI processing charges.
 8.  Keep automatic posting disabled until representative invoices have
     been validated.
 

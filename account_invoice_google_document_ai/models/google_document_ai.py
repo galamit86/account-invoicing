@@ -13,6 +13,8 @@ from google.cloud import documentai_v1 as documentai
 from google.oauth2 import service_account
 
 from odoo import _, models
+from odoo.exceptions import UserError
+from odoo.tools import file_open
 
 
 class AccountInvoiceGoogleDocumentAI(models.AbstractModel):
@@ -44,30 +46,60 @@ class AccountInvoiceGoogleDocumentAI(models.AbstractModel):
             credentials=self._get_credentials(company),
         )
 
-    def _test_connection(self, company):
-        client = self._get_client(company)
-        processor_name = client.processor_path(
-            company.invoice_ocr_google_project,
-            company.invoice_ocr_google_location,
-            company.invoice_ocr_google_processor,
-        )
-        client.get_processor(request={"name": processor_name}, timeout=30)
-
-    def _process_document(self, attachment, company):
-        client = self._get_client(company)
+    def _get_processor_name(self, client, company):
         if company.invoice_ocr_google_processor_version:
-            processor_name = client.processor_version_path(
+            return client.processor_version_path(
                 company.invoice_ocr_google_project,
                 company.invoice_ocr_google_location,
                 company.invoice_ocr_google_processor,
                 company.invoice_ocr_google_processor_version,
             )
-        else:
-            processor_name = client.processor_path(
-                company.invoice_ocr_google_project,
-                company.invoice_ocr_google_location,
-                company.invoice_ocr_google_processor,
-            )
+        return client.processor_path(
+            company.invoice_ocr_google_project,
+            company.invoice_ocr_google_location,
+            company.invoice_ocr_google_processor,
+        )
+
+    def _test_connection(self, company):
+        try:
+            client = self._get_client(company)
+            with file_open(
+                "account_invoice_google_document_ai/static/description/icon.png",
+                "rb",
+            ) as test_image:
+                request = documentai.ProcessRequest(
+                    name=self._get_processor_name(client, company),
+                    raw_document=documentai.RawDocument(
+                        content=test_image.read(),
+                        mime_type="image/png",
+                    ),
+                )
+            client.process_document(request=request, timeout=30)
+        except google_exceptions.PermissionDenied as error:
+            raise UserError(
+                _(
+                    "Google denied document processing. Grant the service account "
+                    "roles/documentai.apiUser and verify that the configured project, "
+                    "location, processor, and processor version are correct."
+                )
+            ) from error
+        except google_exceptions.NotFound as error:
+            raise UserError(
+                _(
+                    "Google could not find the configured processor or processor "
+                    "version. Verify the project, location, processor ID, and version."
+                )
+            ) from error
+        except google_exceptions.GoogleAPICallError as error:
+            raise UserError(
+                _("Google connection test failed: %s") % error.message
+            ) from error
+        except ValueError as error:
+            raise UserError(str(error)) from error
+
+    def _process_document(self, attachment, company):
+        client = self._get_client(company)
+        processor_name = self._get_processor_name(client, company)
         request = documentai.ProcessRequest(
             name=processor_name,
             raw_document=documentai.RawDocument(

@@ -5,10 +5,11 @@ import base64
 import json
 from unittest.mock import MagicMock, patch
 
+from google.api_core import exceptions as google_exceptions
 from google.cloud import documentai_v1 as documentai
 
 from odoo import Command
-from odoo.exceptions import ValidationError
+from odoo.exceptions import UserError, ValidationError
 from odoo.tests import TransactionCase, tagged
 
 from odoo.addons.queue_job.tests.common import trap_jobs
@@ -364,3 +365,60 @@ class TestInvoiceGoogleDocumentAI(TransactionCase):
         self.assertEqual(test_connection.call_args.args[0], self.company)
         self.assertEqual(action["tag"], "display_notification")
         self.assertEqual(action["params"]["type"], "success")
+
+    def test_connection_processes_test_image_with_configured_processor(self):
+        service = self.env["account.invoice.google.document.ai"]
+        client = MagicMock()
+        client.processor_path.return_value = "processors/test-processor"
+
+        with patch.object(type(service), "_get_client", return_value=client):
+            service._test_connection(self.company)
+
+        client.processor_path.assert_called_once_with(
+            "test-project", "eu", "test-processor"
+        )
+        request = client.process_document.call_args.kwargs["request"]
+        self.assertEqual(request.name, "processors/test-processor")
+        self.assertEqual(request.raw_document.mime_type, "image/png")
+        self.assertTrue(request.raw_document.content.startswith(b"\x89PNG"))
+
+    def test_connection_uses_pinned_processor_version(self):
+        self.company.invoice_ocr_google_processor_version = "test-version"
+        service = self.env["account.invoice.google.document.ai"]
+        client = MagicMock()
+        client.processor_version_path.return_value = "processorVersions/test-version"
+
+        with patch.object(type(service), "_get_client", return_value=client):
+            service._test_connection(self.company)
+
+        client.processor_version_path.assert_called_once_with(
+            "test-project", "eu", "test-processor", "test-version"
+        )
+        request = client.process_document.call_args.kwargs["request"]
+        self.assertEqual(request.name, "processorVersions/test-version")
+
+    def test_connection_permission_error_is_actionable(self):
+        service = self.env["account.invoice.google.document.ai"]
+        client = MagicMock()
+        client.process_document.side_effect = google_exceptions.PermissionDenied(
+            "documentai.processors.processOnline denied"
+        )
+
+        with (
+            patch.object(type(service), "_get_client", return_value=client),
+            self.assertRaisesRegex(UserError, "roles/documentai.apiUser"),
+        ):
+            service._test_connection(self.company)
+
+    def test_connection_missing_processor_error_is_actionable(self):
+        service = self.env["account.invoice.google.document.ai"]
+        client = MagicMock()
+        client.process_document.side_effect = google_exceptions.NotFound(
+            "processor not found"
+        )
+
+        with (
+            patch.object(type(service), "_get_client", return_value=client),
+            self.assertRaisesRegex(UserError, "could not find"),
+        ):
+            service._test_connection(self.company)
